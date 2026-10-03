@@ -1,0 +1,336 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+VAULT_ROOT="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+export VAULT_DIR="${VAULT_DIR:-$HOME/.vault}"
+export PYTHONPATH="$VAULT_ROOT/lib${PYTHONPATH:+:$PYTHONPATH}"
+
+CLIENT="$VAULT_ROOT/lib/vault_client.py"
+DB_PATH="$VAULT_DIR/vault.db"
+
+run_client() {
+    python3 "$CLIENT" "$@"
+}
+
+client_capture() {
+    local out rc
+    set +e
+    out="$(run_client "$@" 2>/dev/null)"
+    rc=$?
+    set -e
+    printf '%s' "$out"
+    return "$rc"
+}
+
+is_initialized() {
+    [ -f "$DB_PATH" ]
+}
+
+require_initialized() {
+    if ! is_initialized; then
+        printf '✗ Vault is not initialized.\n'
+        printf 'Run: vault init\n'
+        exit 1
+    fi
+}
+
+require_unlocked() {
+    local status
+    status="$(client_capture status || true)"
+    if [ "$status" != "unlocked" ]; then
+        printf '✗ Vault is locked.\n'
+        printf 'Run: vault unlock\n'
+        exit 1
+    fi
+}
+
+lower() {
+    printf '%s' "$1" | tr '[:upper:]' '[:lower:]'
+}
+
+source_exists() {
+    set +e
+    run_client current "$1" >/dev/null 2>&1
+    local rc=$?
+    set -e
+    return "$rc"
+}
+
+show_help() {
+    cat <<'USAGE'
+Vault — Local Secret Manager
+
+Usage:
+    vault <command>
+
+Commands:
+    vault init            Initialize a new vault
+    vault unlock          Unlock the vault
+    vault lock            Lock the vault
+    vault status          Show lock state
+    vault add             Add a new secret
+    vault show            Show/copy secrets (fzf)
+    vault show <name>     Show/copy a specific secret
+    vault edit            Edit a secret (fzf)
+    vault edit <name>     Edit username/password for a secret
+    vault delete          Delete a secret (fzf)
+    vault delete <name>   Delete a specific secret
+    vault help            Show this help
+
+Notes:
+    add / show / edit / delete require an unlocked vault.
+    Empty input on "edit" keeps the existing value.
+    Credentials are copied to the Termux clipboard, never printed.
+
+Examples:
+    vault init
+    vault unlock
+    vault add
+    vault show
+    vault show github
+    vault edit github
+    vault delete github
+    vault lock
+USAGE
+}
+
+pick_source() {
+    local list
+    list="$(client_capture list || true)"
+    if [ -z "$list" ]; then
+        printf 'No secrets found.\n'
+        exit 0
+    fi
+    printf '%s\n' "$list" | fzf --height 40% --reverse --border \
+        --prompt="Select: " \
+        --preview="\"$VAULT_ROOT/bin/vault\" __preview {} 2>/dev/null"
+}
+
+copy_secret() {
+    local source="$1" out
+    set +e
+    out="$(run_client copy "$source" 2>/dev/null)"
+    local rc=$?
+    set -e
+    if [ "$rc" -ne 0 ]; then
+        if [ "$out" = "error:not_found" ]; then
+            printf '✗ No such secret %s\n' "$source"
+        else
+            printf '✗ Failed to copy credentials\n'
+        fi
+        exit 1
+    fi
+    printf '✓ Credentials copied successfully\n'
+}
+
+cmd="${1:-help}"
+
+case "$cmd" in
+    help|-h|--help)
+        show_help
+        ;;
+
+    __preview)
+        require_initialized
+        run_client preview "${2:-}" 2>/dev/null || true
+        ;;
+
+    init)
+        if is_initialized; then
+            printf '⚠ Vault already exists at %s\n' "$VAULT_DIR"
+            read -rp "Reinitialize and overwrite? [y/N]: " ans || true
+            case "${ans:-}" in
+                y|Y) ;;
+                *) printf 'Aborted.\n'; exit 0 ;;
+            esac
+            run_client lock >/dev/null 2>&1 || true
+            rm -f "$DB_PATH" "$VAULT_DIR/vault.sock" "$VAULT_DIR/vaultd.pid" "$VAULT_DIR/session.token"
+        fi
+        printf 'Master password: ' >&2
+        IFS= read -rs mp || true
+        printf '\n' >&2
+        printf 'Confirm master password: ' >&2
+        IFS= read -rs mp2 || true
+        printf '\n' >&2
+        if [ -z "${mp:-}" ] || [ "$mp" != "$mp2" ]; then
+            printf '✗ Passwords do not match or empty.\n'
+            exit 1
+        fi
+        if ! printf '%s\n%s\n' "$mp" "$mp2" | run_client init >/dev/null 2>&1; then
+            printf '✗ Initialization failed.\n'
+            exit 1
+        fi
+        unset mp mp2
+        printf '✓ Vault initialized\n'
+        ;;
+
+    unlock)
+        require_initialized
+        if [ "$(client_capture status || true)" = "unlocked" ]; then
+            printf '✓ Vault already unlocked\n'
+            exit 0
+        fi
+        if ! client_capture start >/dev/null 2>&1; then
+            printf '✗ Could not start vault session\n'
+            exit 1
+        fi
+        printf 'Master password: ' >&2
+        IFS= read -rs mp || true
+        printf '\n' >&2
+        if ! printf '%s\n' "${mp:-}" | run_client unlock >/dev/null 2>&1; then
+            unset mp
+            run_client lock >/dev/null 2>&1 || true
+            printf '✗ Invalid master password\n'
+            exit 1
+        fi
+        unset mp
+        printf '✓ Vault unlocked\n'
+        ;;
+
+    lock)
+        require_initialized
+        out="$(client_capture lock || true)"
+        if [ "$out" = "already" ]; then
+            printf 'Vault is already locked.\n'
+        else
+            printf '✓ Vault locked\n'
+        fi
+        ;;
+
+    status)
+        require_initialized
+        if [ "$(client_capture status || true)" = "unlocked" ]; then
+            printf 'Vault is unlocked.\n'
+        else
+            printf 'Vault is locked.\n'
+        fi
+        ;;
+
+    add)
+        require_initialized
+        require_unlocked
+        read -rp "Source: " src || true
+        read -rp "Username: " un || true
+        printf 'Password: ' >&2
+        IFS= read -rs pw || true
+        printf '\n' >&2
+        if [ -z "${src:-}" ]; then
+            printf '✗ Source must not be empty.\n'
+            exit 1
+        fi
+        set +e
+        out="$(printf '%s\n%s\n%s\n' "$src" "${un:-}" "${pw:-}" | run_client add 2>/dev/null)"
+        rc=$?
+        set -e
+        if [ "$rc" -eq 0 ]; then
+            unset pw
+            printf '✓ Secret added\n'
+            exit 0
+        fi
+        if [ "$out" = "error:duplicate" ]; then
+            printf "Source '%s' already exists.\n" "$(lower "$src")"
+            read -rp "Update it? [y/N]: " ans || true
+            case "${ans:-}" in
+                y|Y)
+                    if printf '%s\n%s\n%s\n' "$src" "${un:-}" "${pw:-}" | run_client update >/dev/null 2>&1; then
+                        unset pw
+                        printf "✓ Secret '%s' updated\n" "$(lower "$src")"
+                    else
+                        unset pw
+                        printf '✗ Failed to update secret\n'
+                        exit 1
+                    fi
+                    ;;
+                *) unset pw; printf 'Aborted.\n' ;;
+            esac
+            exit 0
+        fi
+        unset pw
+        printf '✗ Failed to add secret\n'
+        exit 1
+        ;;
+
+    show)
+        require_initialized
+        require_unlocked
+        if [ "$#" -ge 2 ]; then
+            copy_secret "$(lower "$2")"
+            exit 0
+        fi
+        sel="$(pick_source)"
+        if [ -z "${sel:-}" ]; then
+            exit 0
+        fi
+        copy_secret "$(lower "$sel")"
+        ;;
+
+    edit)
+        require_initialized
+        require_unlocked
+        if [ "$#" -ge 2 ]; then
+            sel="$(lower "$2")"
+        else
+            sel="$(pick_source)"
+            if [ -z "${sel:-}" ]; then
+                exit 0
+            fi
+        fi
+        if ! source_exists "$sel"; then
+            printf '✗ No such secret %s\n' "$sel"
+            exit 1
+        fi
+        cur="$(client_capture current "$sel" || true)"
+        printf 'Editing: %s\n' "$sel"
+        printf 'Current Username: %s\n' "$cur"
+        read -rp "New Username [leave empty to keep]: " new_un || true
+        printf 'New Password [leave empty to keep]: ' >&2
+        IFS= read -rs new_pw || true
+        printf '\n' >&2
+        if [ -z "${new_un:-}" ] && [ -z "${new_pw:-}" ]; then
+            printf 'No changes made.\n'
+            exit 0
+        fi
+        if printf '%s\n%s\n%s\n' "$sel" "${new_un:-}" "${new_pw:-}" | run_client update >/dev/null 2>&1; then
+            unset new_pw
+            printf "✓ Secret '%s' updated\n" "$sel"
+        else
+            unset new_pw
+            printf '✗ Failed to update secret\n'
+            exit 1
+        fi
+        ;;
+
+    delete)
+        require_initialized
+        require_unlocked
+        if [ "$#" -ge 2 ]; then
+            sel="$(lower "$2")"
+        else
+            sel="$(pick_source)"
+            if [ -z "${sel:-}" ]; then
+                exit 0
+            fi
+        fi
+        if ! source_exists "$sel"; then
+            printf '✗ No such source found: %s\n' "$sel"
+            exit 1
+        fi
+        read -rp "Delete secret '$sel'? [y/N]: " ans || true
+        case "${ans:-}" in
+            y|Y) ;;
+            *) printf 'Aborted.\n'; exit 0 ;;
+        esac
+        if run_client delete "$sel" >/dev/null 2>&1; then
+            printf "✓ Secret '%s' deleted\n" "$sel"
+        else
+            printf '✗ Could not delete %s\n' "$sel"
+            exit 1
+        fi
+        ;;
+
+    *)
+        printf 'Unknown command: %s\n' "$cmd"
+        printf 'Run: vault help\n'
+        exit 1
+        ;;
+esac
