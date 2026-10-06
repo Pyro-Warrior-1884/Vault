@@ -75,6 +75,7 @@ vault show       # fzf picker, copies username then password
 vault show github
 vault edit github
 vault delete github
+vault backup
 vault lock
 ```
 
@@ -96,6 +97,7 @@ vault lock
 | `vault edit <name>` | yes | Edit username/password for a record. |
 | `vault delete` | yes | `fzf` picker; delete with confirmation. |
 | `vault delete <name>` | yes | Delete a record with confirmation. |
+| `vault backup` | yes | Export all records as **plaintext JSON** to `${PHONE}/Personal/Training_Routine.json` (overwrite), then notify via `termux-sms-send -n "$PHONENO"`. |
 
 Notes:
 
@@ -107,6 +109,10 @@ Notes:
   in the clipboard last. Credentials are never printed to the terminal.
 - Source names are normalized to lowercase for storage/lookup, so
   `vault show GitHub` and `vault show github` are the same record.
+- `backup` writes **plaintext** credentials to shared storage (only as safe as
+  your device's storage permissions), and needs `$PHONE` (backup directory),
+  `$PHONENO` (SMS recipient) and `termux-sms-send`. If the SMS fails, the file
+  is still saved and a warning is printed.
 
 Example session:
 
@@ -288,7 +294,7 @@ Limitations you should understand:
 python3 -m pytest tests/ -q
 ```
 
-The suite (28 tests) covers:
+The suite (31 tests) covers:
 
 - **Crypto** (`tests/test_crypto.py`): round-trip; wrong key fails; tampered and
   truncated ciphertext fail; different nonces produce different ciphertext for
@@ -300,6 +306,7 @@ The suite (28 tests) covers:
 - **CLI** (`tests/test_cli.py`): init; locked-state enforcement; wrong master
   password; unlock/lock/status (idempotent lock); add/show/edit/delete;
   edit-both-empty no-op; delete of nonexistent; duplicate prompt; `fzf` flows;
+  backup (JSON contents, SMS arguments, overwrite, locked-state enforcement);
   and explicit security checks (no plaintext in the DB, no tracebacks, DEK not
   on disk).
 
@@ -319,14 +326,17 @@ troubleshooting (still never prints secret contents).
   "keep"). Renaming is planned.
 - The `fzf` preview shows the password masked as `********` rather than a
   ciphertext fingerprint. (A truncated ciphertext hash could be added later.)
-- Single user, local only; no sync/backup/export yet.
+- Single user, local only; no sync/restore/import yet.
+- `vault backup` produces a **plaintext** JSON on shared storage and sends an
+  SMS notification; both the file location and the SMS recipient come from
+  `$PHONE`/`$PHONENO`.
 
 ---
 
 ## 12. Future improvements
 
 `vault generate`, `vault search`, `vault edit` (rename), `vault change-password`,
-`vault backup` / `restore`, `vault export` / `import`, `vault history`,
+`vault restore`, `vault export` / `import`, `vault history`,
 clipboard auto-clear/timeout, and biometric unlock via Termux:API.
 
 The schema and versioned crypto format were designed so these can be added

@@ -15,6 +15,7 @@ import socket
 import subprocess
 import sys
 import time
+from datetime import datetime
 
 from common import (
     SOCKET_PATH, PID_PATH, TOKEN_PATH, DB_PATH,
@@ -280,6 +281,58 @@ def cmd_delete(source: str) -> None:
     sys.stdout.write("ok\n")
 
 
+BACKUP_FILENAME = "Training_Routine.json"
+SMS_MESSAGE = "Vault backup complete"
+
+
+def _backup_dir() -> str:
+    phone = os.environ.get("PHONE") or os.path.expanduser("~/storage/shared/Notes")
+    return os.path.join(phone, "Personal")
+
+
+def cmd_backup() -> None:
+    resp = _request({"cmd": "export"})
+    if not resp.get("ok"):
+        _die(resp.get("error", "error"))
+    secrets = resp.get("secrets", [])
+    try:
+        backup_dir = _backup_dir()
+        os.makedirs(backup_dir, exist_ok=True)
+        path = os.path.join(backup_dir, BACKUP_FILENAME)
+        payload = {
+            "exported_at": datetime.now().strftime("%d/%m/%Y %I:%M %p"),
+            "count": len(secrets),
+            "secrets": secrets,
+        }
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+            f.write("\n")
+        restrict(path)
+    except OSError:
+        _die("backup_failed")
+
+    sms_failed = False
+    tool = shutil.which("termux-sms-send")
+    if not tool:
+        sms_failed = True
+    else:
+        try:
+            p = subprocess.run(
+                [tool, "-n", os.environ.get("PHONENO", ""), SMS_MESSAGE],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=15,
+            )
+            sms_failed = p.returncode != 0
+        except (OSError, subprocess.TimeoutExpired):
+            sms_failed = True
+
+    sys.stdout.write("ok " + path + "\n")
+    if sms_failed:
+        sys.stdout.write("warn:sms_failed\n")
+
+
 def main() -> None:
     if len(sys.argv) < 2:
         _die("usage")
@@ -294,6 +347,7 @@ def main() -> None:
         "list": lambda: cmd_list(),
         "add": lambda: cmd_add(),
         "update": lambda: cmd_update(),
+        "backup": lambda: cmd_backup(),
     }
     if cmd in dispatch:
         dispatch[cmd]()

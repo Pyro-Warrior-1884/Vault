@@ -1,4 +1,6 @@
+import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -41,12 +43,32 @@ def env(tmp_path):
         )
     os.chmod(fzf, 0o755)
 
+    sms_log = os.path.join(short, "sms.txt")
+    sms_tool = os.path.join(mock, "termux-sms-send")
+    with open(sms_tool, "w") as f:
+        f.write(
+            "#!/data/data/com.termux/files/usr/bin/bash\n"
+            "printf '%s\\n' \"$@\" > {}\n".format(sms_log)
+        )
+    os.chmod(sms_tool, 0o755)
+
+    phone = os.path.join(short, "phone")
+
     e = dict(os.environ)
     e["VAULT_DIR"] = vault_dir
     e["PATH"] = mock + os.pathsep + e["PATH"]
     e["FZF_CHOICE"] = "github"
+    e["PHONE"] = phone
+    e["PHONENO"] = "15550001111"
     e["PYTHONPATH"] = LIB + os.pathsep + e.get("PYTHONPATH", "")
-    ctx = {"env": e, "vault_dir": vault_dir, "clip": clip, "tmp": short}
+    ctx = {
+        "env": e,
+        "vault_dir": vault_dir,
+        "clip": clip,
+        "tmp": short,
+        "phone": phone,
+        "sms_log": sms_log,
+    }
     yield ctx
     subprocess.run(["bash", VAULT, "lock"], capture_output=True, text=True, env=e, timeout=30)
     shutil.rmtree(short, ignore_errors=True)
@@ -182,6 +204,60 @@ def test_fzf_show_and_delete(env):
     assert open(env["clip"]).read() == "hunter2"
     r = run(env, ["delete"], stdin="y\n", choice="github")
     assert "deleted" in r.stdout
+
+
+# ---- backup ---------------------------------------------------------------
+def backup_file(env):
+    return os.path.join(env["phone"], "Personal", "Training_Routine.json")
+
+
+def test_backup_creates_json_and_sends_sms(env):
+    init(env)
+    unlock(env)
+    add(env, "GitHub", "alice", "hunter2")
+    add(env, "gitlab", "bob", "secret99")
+    r = run(env, ["backup"])
+    assert r.returncode == 0, r.stderr + r.stdout
+    assert "Backup saved" in r.stdout
+    path = backup_file(env)
+    assert os.path.exists(path)
+    with open(path) as f:
+        data = json.load(f)
+    assert data["count"] == 2
+    assert re.fullmatch(r"\d{2}/\d{2}/\d{4} \d{2}:\d{2} (AM|PM)", data["exported_at"])
+    by_src = {s["source"]: s for s in data["secrets"]}
+    assert by_src["github"]["username"] == "alice"
+    assert by_src["github"]["password"] == "hunter2"
+    assert by_src["gitlab"]["username"] == "bob"
+    assert by_src["gitlab"]["password"] == "secret99"
+    assert "sms_failed" not in r.stdout
+    sms = open(env["sms_log"]).read().splitlines()
+    assert "-n" in sms
+    assert "15550001111" in sms
+    assert "Vault backup complete" in sms
+
+
+def test_backup_requires_unlock(env):
+    init(env)
+    r = run(env, ["backup"])
+    assert r.returncode != 0
+    assert "locked" in r.stdout.lower()
+    assert not os.path.exists(backup_file(env))
+
+
+def test_backup_overwrites_silently(env):
+    init(env)
+    unlock(env)
+    add(env, "github", "alice", "hunter2")
+    assert run(env, ["backup"]).returncode == 0
+    r = run(env, ["edit", "github"], stdin="alice\nnewpass\n")
+    assert "updated" in r.stdout
+    r = run(env, ["backup"])
+    assert r.returncode == 0, r.stderr + r.stdout
+    with open(backup_file(env)) as f:
+        data = json.load(f)
+    assert data["count"] == 1
+    assert data["secrets"][0]["password"] == "newpass"
 
 
 # ---- security assertions -------------------------------------------------

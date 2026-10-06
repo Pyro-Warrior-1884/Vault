@@ -75,6 +75,7 @@ Commands:
     vault edit <name>     Edit username/password for a secret
     vault delete          Delete a secret (fzf)
     vault delete <name>   Delete a specific secret
+    vault backup          Export all secrets to a JSON file and send an SMS notice
     vault help            Show this help
 
 Notes:
@@ -326,6 +327,31 @@ case "$cmd" in
             printf '✗ Could not delete %s\n' "$sel"
             exit 1
         fi
+        ;;
+
+    backup)
+        require_initialized
+        require_unlocked
+        set +e
+        out="$(run_client backup 2>/dev/null)"
+        rc=$?
+        set -e
+        if [ "$rc" -ne 0 ]; then
+            if [ "$out" = "error:backup_failed" ]; then
+                printf '✗ Failed to write backup file\n'
+            else
+                printf '✗ Backup failed\n'
+            fi
+            exit 1
+        fi
+        first="${out%%$'\n'*}"
+        path="${first#ok }"
+        printf '✓ Backup saved to %s\n' "$path"
+        case "$out" in
+            *warn:sms_failed*)
+                printf '⚠ SMS notification failed (backup saved)\n'
+                ;;
+        esac
         ;;
 
     *)

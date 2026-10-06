@@ -103,6 +103,17 @@ class VaultDaemon:
             if cmd == "list_sources":
                 return {"ok": True, "sources": db.list_sources()}
 
+            if cmd == "export":
+                secrets = []
+                for source in db.list_sources():
+                    d = self.decrypt_payload(source)
+                    secrets.append({
+                        "source": source,
+                        "username": d["username"],
+                        "password": d["password"],
+                    })
+                return {"ok": True, "secrets": secrets}
+
             if cmd == "preview":
                 try:
                     d = self.decrypt_payload(msg.get("source", ""))
