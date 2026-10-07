@@ -333,6 +333,56 @@ def cmd_backup() -> None:
         sys.stdout.write("warn:sms_failed\n")
 
 
+def _backup_path() -> str:
+    return os.path.join(_backup_dir(), BACKUP_FILENAME)
+
+
+def _read_backup() -> "list":
+    path = _backup_path()
+    if not os.path.isfile(path):
+        _die("no_backup")
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        _die("bad_backup")
+    secrets = data.get("secrets") if isinstance(data, dict) else None
+    if not isinstance(secrets, list):
+        _die("bad_backup")
+    for item in secrets:
+        if (
+            not isinstance(item, dict)
+            or not isinstance(item.get("source"), str)
+            or not item["source"].strip()
+            or not isinstance(item.get("username"), str)
+            or not isinstance(item.get("password"), str)
+        ):
+            _die("bad_backup")
+    return secrets
+
+
+def cmd_restore(args: "list") -> None:
+    if args[:1] == ["plan"]:
+        secrets = _read_backup()
+        resp = _request({"cmd": "import_plan", "secrets": secrets})
+        if not resp.get("ok"):
+            _die(resp.get("error", "error"))
+        sys.stdout.write("total {}\n".format(len(secrets)))
+        for s in resp.get("conflicts", []):
+            sys.stdout.write("conflict " + s + "\n")
+        return
+    if len(args) == 2 and args[0] == "apply" and args[1] in ("overwrite", "skip"):
+        secrets = _read_backup()
+        resp = _request({"cmd": "import", "secrets": secrets, "mode": args[1]})
+        if not resp.get("ok"):
+            _die(resp.get("error", "error"))
+        sys.stdout.write("ok {} {} {}\n".format(
+            resp.get("added", 0), resp.get("updated", 0), resp.get("skipped", 0),
+        ))
+        return
+    _die("usage")
+
+
 def main() -> None:
     if len(sys.argv) < 2:
         _die("usage")
@@ -348,6 +398,7 @@ def main() -> None:
         "add": lambda: cmd_add(),
         "update": lambda: cmd_update(),
         "backup": lambda: cmd_backup(),
+        "restore": lambda: cmd_restore(args),
     }
     if cmd in dispatch:
         dispatch[cmd]()

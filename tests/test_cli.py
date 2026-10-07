@@ -260,6 +260,98 @@ def test_backup_overwrites_silently(env):
     assert data["secrets"][0]["password"] == "newpass"
 
 
+# ---- restore --------------------------------------------------------------
+def test_restore_roundtrip(env):
+    init(env)
+    unlock(env)
+    add(env, "GitHub", "alice", "hunter2")
+    add(env, "gitlab", "bob", "secret99")
+    assert run(env, ["backup"]).returncode == 0
+    assert run(env, ["delete", "github"], stdin="y\n").returncode == 0
+    assert run(env, ["delete", "gitlab"], stdin="y\n").returncode == 0
+    r = run(env, ["restore"])
+    assert r.returncode == 0, r.stderr + r.stdout
+    assert "Restore complete: 2 added, 0 updated, 0 skipped" in r.stdout
+    run(env, ["show", "github"])
+    assert open(env["clip"]).read() == "hunter2"
+    run(env, ["show", "gitlab"])
+    assert open(env["clip"]).read() == "secret99"
+
+
+def test_restore_requires_unlock(env):
+    init(env)
+    r = run(env, ["restore"])
+    assert r.returncode != 0
+    assert "locked" in r.stdout.lower()
+
+
+def test_restore_missing_file(env):
+    init(env)
+    unlock(env)
+    r = run(env, ["restore"])
+    assert r.returncode != 0
+    assert "No backup found" in r.stdout
+    assert "Traceback" not in r.stderr
+
+
+def test_restore_invalid_json(env):
+    init(env)
+    unlock(env)
+    os.makedirs(os.path.dirname(backup_file(env)), exist_ok=True)
+    with open(backup_file(env), "w") as f:
+        f.write("{not json")
+    r = run(env, ["restore"])
+    assert r.returncode != 0
+    assert "invalid" in r.stdout.lower()
+    assert "Traceback" not in r.stderr
+
+
+def test_restore_conflict_declined(env):
+    init(env)
+    unlock(env)
+    add(env, "github", "alice", "hunter2")
+    add(env, "gitlab", "bob", "secret99")
+    assert run(env, ["backup"]).returncode == 0
+    r = run(env, ["edit", "github"], stdin="alice\nnewpass\n")
+    assert "updated" in r.stdout
+    assert run(env, ["delete", "gitlab"], stdin="y\n").returncode == 0
+    add(env, "twitter", "carol", "pw3")
+    r = run(env, ["restore"], stdin="n\n")
+    assert r.returncode == 0, r.stderr + r.stdout
+    assert "Already in vault: github" in r.stdout
+    assert "Restore complete: 1 added, 0 updated, 1 skipped" in r.stdout
+    run(env, ["show", "github"])
+    assert open(env["clip"]).read() == "newpass"
+    run(env, ["show", "gitlab"])
+    assert open(env["clip"]).read() == "secret99"
+    run(env, ["show", "twitter"])
+    assert open(env["clip"]).read() == "pw3"
+
+
+def test_restore_conflict_accepted(env):
+    init(env)
+    unlock(env)
+    add(env, "github", "alice", "hunter2")
+    assert run(env, ["backup"]).returncode == 0
+    r = run(env, ["edit", "github"], stdin="alice\nnewpass\n")
+    assert "updated" in r.stdout
+    r = run(env, ["restore"], stdin="y\n")
+    assert r.returncode == 0, r.stderr + r.stdout
+    assert "Already in vault: github" in r.stdout
+    assert "Restore complete: 0 added, 1 updated, 0 skipped" in r.stdout
+    run(env, ["show", "github"])
+    assert open(env["clip"]).read() == "hunter2"
+
+
+def test_restore_empty_backup(env):
+    init(env)
+    unlock(env)
+    assert run(env, ["backup"]).returncode == 0
+    r = run(env, ["restore"])
+    assert r.returncode == 0, r.stderr + r.stdout
+    assert "Backup contains no secrets." in r.stdout
+
+
 # ---- security assertions -------------------------------------------------
 def test_sqlite_never_contains_plaintext(env):
     init(env)

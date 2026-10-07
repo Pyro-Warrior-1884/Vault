@@ -76,6 +76,7 @@ Commands:
     vault delete          Delete a secret (fzf)
     vault delete <name>   Delete a specific secret
     vault backup          Export all secrets to a JSON file and send an SMS notice
+    vault restore         Import secrets from the backup JSON file (prompts before overwriting)
     vault help            Show this help
 
 Notes:
@@ -93,6 +94,10 @@ Examples:
     vault delete github
     vault lock
 USAGE
+}
+
+backup_file_path() {
+    printf '%s/Personal/Training_Routine.json' "${PHONE:-$HOME/storage/shared/Notes}"
 }
 
 pick_source() {
@@ -352,6 +357,70 @@ case "$cmd" in
                 printf '⚠ SMS notification failed (backup saved)\n'
                 ;;
         esac
+        ;;
+
+    restore)
+        require_initialized
+        require_unlocked
+        set +e
+        plan="$(run_client restore plan 2>/dev/null)"
+        rc=$?
+        set -e
+        if [ "$rc" -ne 0 ]; then
+            case "$plan" in
+                error:no_backup)
+                    printf '✗ No backup found at %s\n' "$(backup_file_path)"
+                    ;;
+                error:bad_backup)
+                    printf '✗ Backup file is invalid\n'
+                    ;;
+                *)
+                    printf '✗ Restore failed\n'
+                    ;;
+            esac
+            exit 1
+        fi
+        total="$(printf '%s\n' "$plan" | awk '/^total /{print $2; exit}')"
+        if [ "${total:-0}" -eq 0 ]; then
+            printf 'Backup contains no secrets.\n'
+            exit 0
+        fi
+        conflicts="$(printf '%s\n' "$plan" | awk '/^conflict /{sub(/^conflict /,""); print}')"
+        mode="overwrite"
+        if [ -n "$conflicts" ]; then
+            n="$(printf '%s\n' "$conflicts" | grep -c .)"
+            list="$(printf '%s\n' "$conflicts" | awk 'NR>1{printf ", "} {printf "%s", $0}')"
+            printf 'Already in vault: %s\n' "$list"
+            read -rp "Overwrite $n existing record(s)? [y/N]: " ans || true
+            case "${ans:-}" in
+                y|Y) mode="overwrite" ;;
+                *) mode="skip" ;;
+            esac
+        fi
+        set +e
+        out="$(run_client restore apply "$mode" 2>/dev/null)"
+        rc=$?
+        set -e
+        if [ "$rc" -ne 0 ]; then
+            case "$out" in
+                error:no_backup)
+                    printf '✗ No backup found at %s\n' "$(backup_file_path)"
+                    ;;
+                error:bad_backup)
+                    printf '✗ Backup file is invalid\n'
+                    ;;
+                *)
+                    printf '✗ Restore failed\n'
+                    ;;
+            esac
+            exit 1
+        fi
+        set -- $out
+        if [ "${1:-}" != "ok" ]; then
+            printf '✗ Restore failed\n'
+            exit 1
+        fi
+        printf '✓ Restore complete: %s added, %s updated, %s skipped\n' "${2:-0}" "${3:-0}" "${4:-0}"
         ;;
 
     *)

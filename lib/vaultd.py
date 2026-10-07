@@ -114,6 +114,46 @@ class VaultDaemon:
                     })
                 return {"ok": True, "secrets": secrets}
 
+            if cmd == "import_plan":
+                secrets = msg.get("secrets")
+                if not isinstance(secrets, list):
+                    return {"ok": False, "error": "bad_request"}
+                existing = set(db.list_sources())
+                conflicts = set()
+                for item in secrets:
+                    if not isinstance(item, dict):
+                        return {"ok": False, "error": "bad_request"}
+                    source = db.normalize_source(item.get("source", ""))
+                    if source in existing:
+                        conflicts.add(source)
+                return {"ok": True, "total": len(secrets), "conflicts": sorted(conflicts)}
+
+            if cmd == "import":
+                secrets = msg.get("secrets")
+                mode = msg.get("mode")
+                if not isinstance(secrets, list) or mode not in ("overwrite", "skip"):
+                    return {"ok": False, "error": "bad_request"}
+                for item in secrets:
+                    if (
+                        not isinstance(item, dict)
+                        or not isinstance(item.get("source"), str)
+                        or not item["source"].strip()
+                        or not isinstance(item.get("username"), str)
+                        or not isinstance(item.get("password"), str)
+                    ):
+                        return {"ok": False, "error": "bad_request"}
+                added = updated = skipped = 0
+                for item in secrets:
+                    source = db.normalize_source(item["source"])
+                    payload = self.encrypt_payload(item["username"], item["password"])
+                    if db.add_secret(source, payload):
+                        added += 1
+                    elif mode == "overwrite" and db.update_secret(source, payload):
+                        updated += 1
+                    else:
+                        skipped += 1
+                return {"ok": True, "added": added, "updated": updated, "skipped": skipped}
+
             if cmd == "preview":
                 try:
                     d = self.decrypt_payload(msg.get("source", ""))
